@@ -85,6 +85,7 @@ const int MAX_MAZE_DIFFICULTY = 4;
 
 bool USE_LEVEL_SET = false;
 int NUM_LEVELS = 0;
+int STARTING_LEVEL = 0; 
 int *LEVEL_SEEDS;
 
 bool RANDOM_TILE_COLORS = false;
@@ -603,15 +604,15 @@ public:
       rec_stack.pop_back();
       int x = r.x;
       int y = r.y;
-      bool good_place =
-        maze->get_elem(x, y) == SPACE &&
-        r.y > 2 &&
-        maze->get_elem(x-1, y) == SPACE &&
-        maze->get_elem(x+1, y) == SPACE &&
-        maze->get_elem(x, (y+1)) == SPACE &&
-        is_wall(maze->get_elem(x-1, y-1), true) &&
-        is_wall(maze->get_elem(x, y-1), true) &&
-        is_wall(maze->get_elem(x+1, y-1), true);
+      bool good_place = true;
+      good_place &= maze->get_elem(x-1, y) == SPACE;
+      good_place &= maze->get_elem(x, y) == SPACE;
+      good_place &= maze->get_elem(x+1, y) == SPACE;
+      good_place &= maze->get_elem(x, (y+1)) == SPACE;
+      good_place &= is_wall(maze->get_elem(x-1, y-1), true);
+      good_place &= is_wall(maze->get_elem(x, y-1), true);
+      good_place &= is_wall(maze->get_elem(x+1, y-1), true);
+      good_place &= r.y > 2;
       if (good_place) {
         maze->set_elem(x, y, '1');
         coins += 1;
@@ -1144,6 +1145,7 @@ struct Agent {
   uint8_t* render_hires_buf = 0;
   bool game_over = false;
   float reward = 0;
+  uint32_t level_seed = 0;
   float reward_sum = 0;
   bool is_facing_right;
   bool ladder_mode;
@@ -1444,12 +1446,11 @@ void state_reset(const std::shared_ptr<State>& state, int game_type)
   assert(player_themesl.size() > 0 && "Please call init(threads) first");
 
   int level_seed = 0;
-
   if (USE_LEVEL_SET) {
     int level_index = global_rand_gen.randint(0, NUM_LEVELS);
     level_seed = LEVEL_SEEDS[level_index];
   } else if (NUM_LEVELS > 0) {
-    level_seed = global_rand_gen.randint(0, NUM_LEVELS);
+    level_seed = global_rand_gen.randint(STARTING_LEVEL, STARTING_LEVEL + NUM_LEVELS);
   } else {
     level_seed = global_rand_gen.randint();
   }
@@ -1477,6 +1478,8 @@ void state_reset(const std::shared_ptr<State>& state, int game_type)
 
   Agent &agent = state->agent;
   float zoom = state->maze->default_zoom;
+  // Dipam : Adding level seed info
+  agent.level_seed = level_seed;
   agent.maze = state->maze;
   agent.zoom = zoom;
   agent.target_zoom = zoom;
@@ -1818,6 +1821,8 @@ void initialize_args(int *int_args) {
   int training_sets_seed = int_args[5];
   int rand_seed = int_args[6];
 
+  STARTING_LEVEL = int_args[7];
+
   if (NUM_LEVELS > 0 && (training_sets_seed != -1)) {
     global_rand_gen.seed(training_sets_seed);
 
@@ -1931,7 +1936,8 @@ void vec_wait(
   uint8_t* obs_rgb,
   uint8_t* obs_hires_rgb,
   float* rew,
-  bool* done)
+  bool* done,
+  uint32_t* level_seed)
 {
   std::shared_ptr<VectorOfStates> vstate = vstate_find(handle);
   while (1) {
@@ -1961,6 +1967,8 @@ void vec_wait(
 
     rew[e] = a.reward;
     done[e] = a.game_over;
+	// Dipam - adding level seed to output_iterator
+	level_seed[e] = a.level_seed;
     a.reward = 0;
     a.game_over = false;
   }
@@ -2107,7 +2115,8 @@ public:
     uint8_t bufrgb[RES_W * RES_H * 3];
     float bufrew[1];
     bool bufdone[1];
-    vec_wait(viz->control_handle, bufrgb, 0, bufrew, bufdone);
+    uint32_t buflevseed[1];
+    vec_wait(viz->control_handle, bufrgb, 0, bufrew, bufdone, buflevseed);
     // fprintf(stderr, "%+0.2f %+0.2f %+0.2f\n", bufvel[0], bufvel[1], bufvel[2]);
   }
 

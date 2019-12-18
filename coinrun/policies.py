@@ -82,8 +82,10 @@ def nature_cnn(scaled_images, **conv_kwargs):
     def activ(curr):
         return tf.nn.relu(curr)
 
-    h = activ(conv(scaled_images, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2),
-                   **conv_kwargs))
+   # h = tf.layers.conv2d(inputs=scaled_images, filters = 32, kernel_size=8, strides = (4,4), activation = tf.nn.relu)
+   # h2 = tf.layers.conv2d(inputs=scaled_images, filters = 64, kernel_size=4, strides = (2,2), activation = tf.nn.relu)
+   # h3 = tf.layers.conv2d(inputs=scaled_images, filters = 64, kernel_size=3, strides = (1,1), activation = tf.nn.relu)
+    h = activ(conv(scaled_images, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2),**conv_kwargs))
     h2 = activ(conv(h, 'c2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2), **conv_kwargs))
     h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
     h3 = conv_to_fc(h3)
@@ -94,14 +96,18 @@ def choose_cnn(images):
     scaled_images = tf.cast(images, tf.float32) / 255.
     dropout_assign_ops = []
 
-    if arch == 'nature':
-        out = nature_cnn(scaled_images)
-    elif arch == 'impala':
-        out, dropout_assign_ops = impala_cnn(scaled_images)
-    elif arch == 'impalalarge':
-        out, dropout_assign_ops = impala_cnn(scaled_images, depths=[32, 64, 64, 64, 64])
-    else:
-        assert(False)
+    print('Dipam ..... arch '+arch)
+
+    # Dipam : add variable scope for common features here
+    with tf.variable_scope("features", reuse=tf.AUTO_REUSE):
+        if arch == 'nature':
+            out = nature_cnn(scaled_images)
+        elif arch == 'impala':
+            out, dropout_assign_ops = impala_cnn(scaled_images)
+        elif arch == 'impalalarge':
+            out = impala_cnn(scaled_images, depth=[32, 64, 64, 64, 64])
+        else:
+            assert(False)
 
     return out, dropout_assign_ops
 
@@ -126,9 +132,11 @@ class LstmPolicy(object):
         a0 = self.pd.sample()
         neglogp0 = self.pd.neglogp(a0)
         self.initial_state = np.zeros((nenv, nlstm*2), dtype=np.float32)
+        probd = self.pd.flatparam()
+        greedyaction = self.pd.mode()
 
         def step(ob, state, mask):
-            return sess.run([a0, vf, snew, neglogp0], {X:ob, S:state, M:mask})
+            return sess.run([a0, vf, snew, neglogp0, probd, greedyaction], {X:ob, S:state, M:mask})
 
         def value(ob, state, mask):
             return sess.run(vf, {X:ob, S:state, M:mask})
@@ -147,15 +155,26 @@ class CnnPolicy(object):
 
         with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
             h, self.dropout_assign_ops = choose_cnn(processed_x)
-            vf = fc(h, 'v', 1)[:,0]
-            self.pd, self.pi = self.pdtype.pdfromlatent(h, init_scale=0.01)
+            with tf.variable_scope("policy", reuse = tf.AUTO_REUSE):
+                vf = fc(h, 'v', 1)[:,0]
+                self.pd, self.pi = self.pdtype.pdfromlatent(h, init_scale=0.01)
+
+            # Dipam: Add discrimiator network on h
+            with tf.variable_scope("discriminator", reuse = tf.AUTO_REUSE):
+                discfc1 = tf.nn.tanh(fc(h,'discL1', 100))
+                disc_logits = fc(discfc1,'disc', 2)
+
+        #probd = self.pd.flatparam()
+        #greedyaction = self.pd.mode()
 
         a0 = self.pd.sample()
         neglogp0 = self.pd.neglogp(a0)
         self.initial_state = None
 
         def step(ob, *_args, **_kwargs):
+            #a, v, neglogp, pdout, a_greedy = sess.run([a0, vf, neglogp0, probd, greedyaction], {X:ob})
             a, v, neglogp = sess.run([a0, vf, neglogp0], {X:ob})
+            #return a, v, self.initial_state, neglogp, pdout, a_greedy
             return a, v, self.initial_state, neglogp
 
         def value(ob, *_args, **_kwargs):
@@ -165,6 +184,7 @@ class CnnPolicy(object):
         self.vf = vf
         self.step = step
         self.value = value
+        self.disc_logits = disc_logits
 
 
 def get_policy():

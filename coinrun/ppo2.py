@@ -72,8 +72,20 @@ class Model(object):
         LR = tf.placeholder(tf.float32, [])
         CLIPRANGE = tf.placeholder(tf.float32, [])
 
+        # Dipam:  Add placeholder for discriminator labels and hyperparameters
+        #DISC_LR = tf.placeholder(tf.float32, [])
+        DISC_LAM = tf.placeholder(tf.float32, [])
+        DISC_LABELS = tf.placeholder(tf.int64, [None])
+
         neglogpac = train_model.pd.neglogp(A)
         entropy = tf.reduce_mean(train_model.pd.entropy())
+
+        #Dipam: Add loss for domain discriminator here       
+        disc_logits = train_model.disc_logits
+        
+        domain_onehot = tf.one_hot(DISC_LABELS, 2)
+        disc_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=disc_logits, labels = domain_onehot))
+        #disc_trainer = tf.train.AdamOptimizer(learning_rate = DISC_LR, epsilon=1e-5)
 
         vpred = train_model.vf
         vpredclipped = OLDVPRED + tf.clip_by_value(train_model.vf - OLDVPRED, - CLIPRANGE, CLIPRANGE)
@@ -104,37 +116,81 @@ class Model(object):
 
         loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef + l2_loss * Config.L2_WEIGHT
 
-        if Config.SYNC_FROM_ROOT:
-            trainer = MpiAdamOptimizer(MPI.COMM_WORLD, learning_rate=LR, epsilon=1e-5)
-        else:
-            trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
+        #if Config.SYNC_FROM_ROOT:
+        #    trainer = MpiAdamOptimizer(MPI.COMM_WORLD, learning_rate=LR, epsilon=1e-5)
+        #else:
+        orig_trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
+        feat_trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
+        disc_trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
+        polc_trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
 
-        grads_and_var = trainer.compute_gradients(loss, params)
+        feat_params = tf.trainable_variables("model/features")
+        disc_params = tf.trainable_variables("model/discriminator")
+        polc_params = tf.trainable_variables("model/policy")
 
+        feat_loss = loss - tf.multiply(DISC_LAM,disc_loss) # Flip gradients from discriminator
+
+        feat_grad_var = feat_trainer.compute_gradients(feat_loss, feat_params)
+        polc_grad_var = polc_trainer.compute_gradients(loss, polc_params)
+        disc_grad_var = disc_trainer.compute_gradients(disc_loss, disc_params) 
+
+        grads_and_var = orig_trainer.compute_gradients(loss, params)
+        # Dipam: Compute discriminator gradients and apply here along with policy gradients
+ 
         grads, var = zip(*grads_and_var)
+        # Dipam: Add discriminator gradients to policy gradients        
+        
         if max_grad_norm is not None:
             grads, _grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
         grads_and_var = list(zip(grads, var))
 
-        _train = trainer.apply_gradients(grads_and_var)
+       # def apply_max_grad_norm(grads_and_var):
+       #     grads, var = zip(*grads_and_var)
+       # 
+       #     if max_grad_norm is not None:
+       #         grads, _grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
+       #     return list(zip(grads, var))
+# Dipam : TODO: This separate grad norm clipping is not correct, 
+# correct method: ppend all the grads and vars -> clip by global norm-> separate-> apply individually
+       # feat_grad_var = apply_max_grad_norm(feat_grad_var) 
+       # polc_grad_var = apply_max_grad_norm(polc_grad_var)
+       # disc_grad_var = apply_max_grad_norm(disc_grad_var)
+        
+        _train = orig_trainer.apply_gradients(grads_and_var)
+        _train_feat = feat_trainer.apply_gradients(feat_grad_var)
+        _train_polc = polc_trainer.apply_gradients(polc_grad_var)
+        _train_disc = disc_trainer.apply_gradients(disc_grad_var)
 
-        def train(lr, cliprange, obs, returns, masks, actions, values, neglogpacs, states=None):
+        def train(lr, cliprange, disc_lam, obs, returns, masks, actions, values, neglogpacs, levelids, states=None):
             advs = returns - values
 
             adv_mean = np.mean(advs, axis=0, keepdims=True)
             adv_std = np.std(advs, axis=0, keepdims=True)
             advs = (advs - adv_mean) / (adv_std + 1e-8)
+            
+            domain_labels = levelids % 2
 
             td_map = {train_model.X:obs, A:actions, ADV:advs, R:returns, LR:lr,
-                    CLIPRANGE:cliprange, OLDNEGLOGPAC:neglogpacs, OLDVPRED:values}
+                    CLIPRANGE:cliprange, OLDNEGLOGPAC:neglogpacs, OLDVPRED:values,
+                    DISC_LABELS: domain_labels, DISC_LAM: disc_lam}
+
             if states is not None:
                 td_map[train_model.S] = states
                 td_map[train_model.M] = masks
-            return sess.run(
-                [pg_loss, vf_loss, entropy, approxkl, clipfrac, l2_loss, _train],
-                td_map
-            )[:-1]
-        self.loss_names = ['policy_loss', 'value_loss', 'policy_entropy', 'approxkl', 'clipfrac', 'l2_loss']
+
+            if disc_lam == 0:
+                return sess.run(
+                        [pg_loss, vf_loss, entropy, approxkl, clipfrac, l2_loss, loss,_train],
+                        td_map)[:-1]
+            else:
+                return sess.run(
+                    [pg_loss, vf_loss, entropy, approxkl, clipfrac, l2_loss, loss , feat_loss, disc_loss, 
+                    _train_feat, _train_polc, _train_disc],
+                    td_map)[:-3]
+        self.loss_names = ['policy_grad_loss', 'value_loss', 'policy_entropy', 'approxkl', 'clipfrac', 'l2_loss', 
+                           'total_loss']
+        self.disc_loss_names = ['policy_grad_loss', 'value_loss', 'policy_entropy', 'approxkl', 'clipfrac', 'l2_loss', 
+                                'total_loss', 'feat_loss', 'disc_loss']
 
         def save(save_path):
             ps = sess.run(params)
@@ -174,6 +230,7 @@ class Runner(AbstractEnvRunner):
     def run(self):
         # Here, we init the lists that will contain the mb of experiences
         mb_obs, mb_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs = [],[],[],[],[],[]
+        mb_levelids = []
         mb_states = self.states
         epinfos = []
         # For n in range number of steps
@@ -181,6 +238,8 @@ class Runner(AbstractEnvRunner):
             # Given observations, get action value and neglopacs
             # We already have self.obs because Runner superclass run self.obs[:] = env.reset() on init
             actions, values, self.states, neglogpacs = self.model.step(self.obs, self.states, self.dones)
+            # Dipam : Change output of env.reset to return level id also,
+            # Dipam : Slice level id out of infos and append to the return value 
             mb_obs.append(self.obs.copy())
             mb_actions.append(actions)
             mb_values.append(values)
@@ -194,6 +253,8 @@ class Runner(AbstractEnvRunner):
                 maybeepinfo = info.get('episode')
                 if maybeepinfo: epinfos.append(maybeepinfo)
             mb_rewards.append(rewards)
+            levelids = infos[-1].get('level_id')
+            mb_levelids.append(levelids)
         #batch of steps to batch of rollouts
         mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype)
         mb_rewards = np.asarray(mb_rewards, dtype=np.float32)
@@ -201,6 +262,7 @@ class Runner(AbstractEnvRunner):
         mb_values = np.asarray(mb_values, dtype=np.float32)
         mb_neglogpacs = np.asarray(mb_neglogpacs, dtype=np.float32)
         mb_dones = np.asarray(mb_dones, dtype=np.bool)
+        mb_levelids = np.asarray(mb_levelids, dtype=np.int32)
         last_values = self.model.value(self.obs, self.states, self.dones)
 
         # discount/bootstrap off value fn
@@ -218,7 +280,7 @@ class Runner(AbstractEnvRunner):
             mb_advs[t] = lastgaelam = delta + self.gamma * self.lam * nextnonterminal * lastgaelam
         mb_returns = mb_advs + mb_values
 
-        return (*map(sf01, (mb_obs, mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs)),
+        return (*map(sf01, (mb_obs, mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs, mb_levelids)),
             mb_states, epinfos)
 
 def sf01(arr):
@@ -297,11 +359,19 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         frac = 1.0 - (update - 1.0) / nupdates
         lrnow = lr(frac)
         cliprangenow = cliprange(frac)
+        if update > 1500: # Dipam: Apply discriminator for only 80% of the training 
+            disc_lam = 0
+        elif update < 400:
+            disc_lam = 0
+        else:
+            disc_p = (update-400)/nupdates*8 
+            disc_lam = 2/(1 + np.exp(-10*disc_p)) - 1
+            dis_lam = disc_lam*0.3
 
         mpi_print('collecting rollouts...')
         run_tstart = time.time()
 
-        obs, returns, masks, actions, values, neglogpacs, states, epinfos = runner.run()
+        obs, returns, masks, actions, values, neglogpacs, levelids, states, epinfos = runner.run()
         epinfobuf10.extend(epinfos)
         epinfobuf100.extend(epinfos)
 
@@ -321,8 +391,8 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
                 for start in range(0, nbatch, nbatch_train):
                     end = start + nbatch_train
                     mbinds = inds[start:end]
-                    slices = (arr[mbinds] for arr in (obs, returns, masks, actions, values, neglogpacs))
-                    mblossvals.append(model.train(lrnow, cliprangenow, *slices))
+                    slices = (arr[mbinds] for arr in (obs, returns, masks, actions, values, neglogpacs, levelids))
+                    mblossvals.append(model.train(lrnow, cliprangenow, disc_lam, *slices))
         else: # recurrent version
             assert nenvs % nminibatches == 0
             envinds = np.arange(nenvs)
@@ -347,7 +417,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
 
         lossvals = np.mean(mblossvals, axis=0)
         tnow = time.time()
-        fps = int(nbatch / (tnow - tstart))
+        fps = int(nbatch/ (tnow - tstart))
 
         if update % log_interval == 0 or update == 1:
             step = update*nbatch
@@ -362,7 +432,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             tb_writer.log_scalar(ep_len_mean, 'ep_len_mean')
             tb_writer.log_scalar(fps, 'fps')
 
-            mpi_print('time_elapsed', tnow - tfirststart, run_t_total, train_t_total)
+            mpi_print('time_elapsed', tnow - tfirststart, (tnow - tfirststart)/3600., run_t_total, train_t_total)
             mpi_print('timesteps', update*nsteps, total_timesteps)
 
             mpi_print('eplenmean', ep_len_mean)
@@ -372,9 +442,14 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             mpi_print([epinfo['r'] for epinfo in epinfobuf10])
 
             if len(mblossvals):
-                for (lossval, lossname) in zip(lossvals, model.loss_names):
-                    mpi_print(lossname, lossval)
-                    tb_writer.log_scalar(lossval, lossname)
+                if disc_lam == 0:
+                    for (lossval, lossname) in zip(lossvals, model.loss_names):
+                        mpi_print(lossname, lossval)
+                        tb_writer.log_scalar(lossval, lossname)
+                else:
+                    for (lossval, lossname) in zip(lossvals, model.disc_loss_names):
+                        mpi_print(lossname, lossval)
+                        tb_writer.log_scalar(lossval, lossname)
             mpi_print('----\n')
 
         if can_save:

@@ -19,6 +19,9 @@ def create_act_model(sess, env, nenvs):
 
     policy = policies.get_policy()
     act = policy(sess, ob_space, ac_space, nenvs, 1, reuse=False)
+    print(ob_space)
+    print(ac_space)
+    print(nenvs)
 
     return act
 
@@ -28,7 +31,10 @@ def enjoy_env_sess(sess):
     rep_count = Config.REP
 
     if should_eval:
-        env = utils.make_general_env(Config.NUM_EVAL)
+        print("Evaluating")
+        #env = utils.make_general_env(Config.NUM_EVAL)
+        env = utils.make_general_env(100)
+        print("Config num eval: " + str(Config.NUM_EVAL))
         should_render = False
     else:
         env = utils.make_general_env(1)
@@ -39,6 +45,7 @@ def enjoy_env_sess(sess):
         from gym.envs.classic_control import rendering
 
     nenvs = env.num_envs
+    print("Environments: " + str(nenvs))
 
     agent = create_act_model(sess, env, nenvs)
 
@@ -76,7 +83,8 @@ def enjoy_env_sess(sess):
     done = np.zeros(nenvs)
 
     while should_continue():
-        action, values, state, _ = agent.step(obs, state, done)
+        #action, values, state, _, _, _ = agent.step(obs, state, done)
+        action, values, state, _,= agent.step(obs, state, done)
         obs, rew, done, info = env.step(action)
 
         if should_render and should_render_obs:
@@ -112,13 +120,13 @@ def enjoy_env_sess(sess):
                 mpi_print('ep_rew', curr_rews)
 
             curr_rews[:] = 0
-
     result = 0
 
     if should_eval:
         mean_score = np.mean(scores) / rep_count
         max_idx = np.argmax(scores)
         mpi_print('scores', scores / rep_count)
+        mpi_print(info[-1])
         print('mean_score', mean_score)
         mpi_print('max idx', max_idx)
 
@@ -131,8 +139,14 @@ def enjoy_env_sess(sess):
 
 def main():
     utils.setup_mpi_gpus()
-    setup_utils.setup_and_load()
-    with tf.Session() as sess:
+    setup_utils.setup_and_load(num_levels=0, starting_level=0, paint_vel_info=1,
+            restore_id='start0numlev250_256mts', train_eval =True, test_eval = False, num_eval=100, high_difficulty=False)
+    print("High difficulty: " + str(Config.HIGH_DIFFICULTY))
+    frac_gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.3)
+    frac_gpu_config = tf.ConfigProto(gpu_options=frac_gpu_options)
+    nogpu_config = tf.ConfigProto(device_count = {'GPU': 0})
+    with tf.Session(config=nogpu_config) as sess:
+    #with tf.Session(config=frac_gpu_config) as sess:
         enjoy_env_sess(sess)
 
 if __name__ == '__main__':

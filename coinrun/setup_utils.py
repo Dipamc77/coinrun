@@ -29,7 +29,8 @@ def restore_file(restore_id, load_key='default'):
     from coinrun.coinrunenv import init_args_and_threads
     init_args_and_threads(4)
 
-def setup_and_load(use_cmd_line_args=True, **kwargs):
+def setup_and_load(use_cmd_line_args=False, **kwargs):
+#def setup_and_load(use_cmd_line_args=True, **kwargs):
     """
     Initialize the global config using command line options, defaulting to the values in `config.py`.
 

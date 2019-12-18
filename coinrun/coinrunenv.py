@@ -84,6 +84,7 @@ lib.vec_wait.argtypes = [
     npct.ndpointer(dtype=np.uint8, ndim=4),    # larger rgb for render()
     npct.ndpointer(dtype=np.float32, ndim=1),  # rew
     npct.ndpointer(dtype=np.bool, ndim=1),     # done
+    npct.ndpointer(dtype=np.uint32, ndim=1),   # Dipam: Level ID
     ]
 
 already_inited = False
@@ -106,7 +107,8 @@ def init_args_and_threads(cpu_count=4,
         mpi_rank, mpi_size = mpi_util.get_local_rank_size(MPI.COMM_WORLD)
         rand_seed = rand_seed - rand_seed % mpi_size + mpi_rank
 
-    int_args = np.array([int(is_high_difficulty), Config.NUM_LEVELS, int(Config.PAINT_VEL_INFO), Config.USE_DATA_AUGMENTATION, game_versions[Config.GAME_TYPE], Config.SET_SEED, rand_seed]).astype(np.int32)
+    int_args = np.array([int(is_high_difficulty), Config.NUM_LEVELS, int(Config.PAINT_VEL_INFO), Config.USE_DATA_AUGMENTATION, game_versions[Config.GAME_TYPE], Config.SET_SEED, rand_seed, Config.STARTING_LEVEL]).astype(np.int32)
+    print("STARTING_LEVEL is : " + str(Config.STARTING_LEVEL) + "; NUM_LEVEL is : " + str(Config.NUM_LEVELS))
 
     lib.initialize_args(int_args)
     lib.initialize_set_monitor_dir(logger.get_dir().encode('utf-8'), {'off': 0, 'first_env': 1, 'all': 2}[monitor_csv_policy])
@@ -135,9 +137,10 @@ class CoinRunVecEnv(VecEnv):
     `lump_n`: only used when the environment creates `monitor.csv` files
     `default_zoom`: controls how much of the level the agent can see
     """
-    def __init__(self, game_type, num_envs, lump_n=0, default_zoom=5.0):
+    def __init__(self, game_type, num_envs, startlev = 0, lump_n=0, default_zoom=5.0):
         self.metadata = {'render.modes': []}
         self.reward_range = (-float('inf'), float('inf'))
+        #self.startlev = startlev
 
         self.NUM_ACTIONS = lib.get_NUM_ACTIONS()
         self.RES_W       = lib.get_RES_W()
@@ -146,6 +149,7 @@ class CoinRunVecEnv(VecEnv):
 
         self.buf_rew = np.zeros([num_envs], dtype=np.float32)
         self.buf_done = np.zeros([num_envs], dtype=np.bool)
+        self.level_id = np.zeros([num_envs], dtype=np.uint32)
         self.buf_rgb   = np.zeros([num_envs, self.RES_H, self.RES_W, 3], dtype=np.uint8)
         self.hires_render = Config.IS_HIGH_RES
         if self.hires_render:
@@ -191,27 +195,33 @@ class CoinRunVecEnv(VecEnv):
 
     def step_async(self, actions):
         assert actions.dtype in [np.int32, np.int64]
+        #actions = np.ndarray(actions)
+        #print(actions)
         actions = actions.astype(np.int32)
         lib.vec_step_async_discrete(self.handle, actions)
+        
 
     def step_wait(self):
         self.buf_rew = np.zeros_like(self.buf_rew)
         self.buf_done = np.zeros_like(self.buf_done)
+        self.level_id = np.zeros_like(self.level_id)
 
         lib.vec_wait(
             self.handle,
             self.buf_rgb,
             self.buf_render_rgb,
             self.buf_rew,
-            self.buf_done)
+            self.buf_done,
+            self.level_id)
 
         obs_frames = self.buf_rgb
 
         if Config.USE_BLACK_WHITE:
             obs_frames = np.mean(obs_frames, axis=-1).astype(np.uint8)[...,None]
 
+        self.dummy_info.append({'level_id': self.level_id})
         return obs_frames, self.buf_rew, self.buf_done, self.dummy_info
 
-def make(env_id, num_envs, **kwargs):
+def make(env_id, num_envs, startlev = 0, **kwargs):
     assert env_id in game_versions, 'cannot find environment "%s", maybe you mean one of %s' % (env_id, list(game_versions.keys()))
     return CoinRunVecEnv(env_id, num_envs, **kwargs)

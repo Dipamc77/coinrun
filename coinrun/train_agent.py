@@ -11,7 +11,8 @@ from coinrun import setup_utils, policies, wrappers, ppo2
 from coinrun.config import Config
 
 def main():
-    args = setup_utils.setup_and_load()
+    args = setup_utils.setup_and_load(num_levels=250, starting_level=0, paint_vel_info=1, 
+            run_id = 'start0numlev250_256mts_dann_low',num_envs = 32)
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -21,16 +22,21 @@ def main():
 
     utils.setup_mpi_gpus()
 
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True # pylint: disable=E1101
+    #config = tf.ConfigProto()
+    frac_gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.3)
+    frac_gpu_config = tf.ConfigProto(gpu_options=frac_gpu_options)
+    nogpu_config = tf.ConfigProto(device_count = {'GPU': 0})
+    #config.gpu_options.allow_growth = True # pylint: disable=E1101
 
     nenvs = Config.NUM_ENVS
+    print("Num envs: "+ str(Config.NUM_ENVS))
     total_timesteps = int(256e6)
     save_interval = args.save_interval
 
     env = utils.make_general_env(nenvs, seed=rank)
 
-    with tf.Session(config=config):
+    with tf.Session(config=frac_gpu_config):
+    #with tf.Session(config=nogpu_config):
         env = wrappers.add_final_wrappers(env)
         
         policy = policies.get_policy()
